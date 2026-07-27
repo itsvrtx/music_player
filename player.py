@@ -17,7 +17,7 @@ from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 import mutagen
 
-# --- Windows Acrylic Glass Backdrop Blur Helper ---
+
 def apply_windows_acrylic(hwnd, enable=True, blur_opacity=0xBB, round_corners=True):
     if platform.system() != "Windows":
         return
@@ -39,13 +39,13 @@ def apply_windows_acrylic(hwnd, enable=True, blur_opacity=0xBB, round_corners=Tr
 
         policy = ACCENT_POLICY()
         if enable:
-            policy.AccentState = 3  # ACCENT_ENABLE_ACRYLICBLURBEHIND
+            policy.AccentState = 3 
             policy.GradientColor = (blur_opacity << 24) | 0x151518
         else:
-            policy.AccentState = 0  # ACCENT_DISABLED
+            policy.AccentState = 0
 
         data = WINDOWCOMPOSITIONATTRIBDATA()
-        data.Attribute = 19  # WCA_ACCENT_POLICY
+        data.Attribute = 19
         data.Data = ctypes.cast(ctypes.pointer(policy), ctypes.c_void_p)
         data.SizeOfData = ctypes.sizeof(policy)
 
@@ -66,8 +66,6 @@ def apply_windows_acrylic(hwnd, enable=True, blur_opacity=0xBB, round_corners=Tr
     except Exception:
         pass
 
-
-# SVG Icons
 SVG_ICONS = {
     "play": '<svg viewBox="0 0 24 24" fill="{color}"><path d="M8 5v14l11-7z"/></svg>',
     "pause": '<svg viewBox="0 0 24 24" fill="{color}"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>',
@@ -386,7 +384,6 @@ class AnimatedMiniPlayer(QWidget):
         tray_layout.setContentsMargins(self.circle_size + 8, 0, 12, 8)
         tray_layout.setSpacing(2)
 
-        # Top row header with Title and Back to Full Player Button
         header_row = QHBoxLayout()
         header_row.setContentsMargins(0, 0, 0, 0)
         
