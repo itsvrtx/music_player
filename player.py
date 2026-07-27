@@ -1,3 +1,6 @@
+# Developed by itsvrtx
+# Github: https://github.com/itsvrtx
+
 import sys
 import os
 import platform
