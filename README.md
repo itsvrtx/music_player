@@ -123,3 +123,10 @@ If you are distributing this app to other users:
 * **Submit a False Positive Report:** Submit your executable to the [Microsoft Security Intelligence Portal](https://www.microsoft.com/en-us/wdsi/filesubmission) as a software developer. Microsoft usually verifies clean files within a few hours.
 * **Package with an Installer:** Wrapping the executable with **Inno Setup** or **NSIS** helps reduce heuristic flags.
 * **Digital Code Signing:** Sign the `.exe` using an **OV/EV Code Signing Certificate** with `signtool`.
+
+---
+
+## 📄 License
+Distributed under the MIT License. See [LICENSE](LICENSE) for more information.
+
+---
