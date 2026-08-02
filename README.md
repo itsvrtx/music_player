@@ -7,6 +7,23 @@ A sleek, modern, and lightweight desktop music player built with Python and PySi
 ![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey)
 
 ---
+
+## 📋 Table of Contents
+- [🖼️ Preview](#%EF%B8%8F-preview)
+- [Key Features](#key-features)
+- [Built With](#built-with)
+- [Installation & Usage](#installation--usage)
+  - [Option 1: Run the Executable (Recommended for End-Users)](#option-1-run-the-executable-recommended-for-end-users)
+  - [Option 2: Run from Source (For Developers)](#option-2-run-from-source-for-developers)
+  - [Building to .EXE](#building-to-exe)
+- [⚠️ Windows Defender / SmartScreen Warning](#%EF%B8%8F-windows-defender--smartscreen-warning)
+  - [Why does this happen?](#why-does-this-happen)
+  - [How to Run the App (For Users)](#how-to-run-the-app-for-users)
+  - [Solutions for Developers / Distribution](#solutions-for-developers--distribution)
+
+---
+
+---
 ## 🖼️ Preview
 
 <img width="496" height="157" alt="image" src="https://github.com/user-attachments/assets/41a13ab2-785f-4a13-a116-f663d7d862b3" />
@@ -59,7 +76,7 @@ Run the application:
 python player.py
 ```
 
-Building to .EXE
+### Building to .EXE
 To compile the source code into a standalone executable with a custom icon, use PyInstaller:
 
 ```bash
