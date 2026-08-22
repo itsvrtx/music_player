@@ -735,7 +735,7 @@ class FinalGlassMusicPlayer(QWidget):
 
     def init_ui(self):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setWindowTitle("Echoes")
+        self.setWindowTitle("Just Music")
         self.setMinimumSize(240, 160)
         self.resize(360, 200)
 
