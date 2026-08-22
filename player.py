@@ -5,17 +5,18 @@ import sys
 import os
 import platform
 import ctypes
+import sqlite3
 from PySide6.QtCore import (
-    Qt, QUrl, QPoint, QRectF, QThread, Signal, Slot, QPropertyAnimation, 
+    Qt, QUrl, QPoint, QRectF, QThread, Signal, Slot, QPropertyAnimation,
     QEasingCurve, QTimer, QSettings, QSize
 )
 from PySide6.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
+    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QSlider, QPushButton, QFileDialog, QMenu,
     QListWidget, QListWidgetItem, QSizeGrip, QFrame,
-    QLineEdit
+    QLineEdit, QWidgetAction, QMessageBox
 )
-from PySide6.QtGui import QColor, QFont, QPixmap, QImage, QPainter, QPainterPath, QAction, QPen, QFontMetrics, QCursor, QRegion
+from PySide6.QtGui import QColor, QFont, QPixmap, QImage, QPainter, QPainterPath, QAction, QPen, QFontMetrics, QCursor, QRegion, QIcon
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 import mutagen
@@ -81,7 +82,8 @@ SVG_ICONS = {
     "close": '<svg viewBox="0 0 24 24" fill="{color}"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>',
     "circle_mode": '<svg viewBox="0 0 24 24" fill="{color}"><circle cx="12" cy="12" r="9" stroke="{color}" stroke-width="2" fill="none"/></svg>',
     "music": '<svg viewBox="0 0 24 24" fill="{color}"><path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/></svg>',
-    "back": '<svg viewBox="0 0 24 24" fill="{color}"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>'
+    "back": '<svg viewBox="0 0 24 24" fill="{color}"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>',
+    "trash": '<svg viewBox="0 0 24 24" fill="{color}"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>'
 }
 
 def render_svg_pixmap(name, color="#FFFFFF", size=16):
@@ -93,6 +95,116 @@ def render_svg_pixmap(name, color="#FFFFFF", size=16):
     renderer.render(painter)
     painter.end()
     return pixmap
+
+
+APP_DIR_NAME = "GlassPlayer"
+DB_FILENAME = "library.db"
+AUDIO_EXTS = ('.mp3', '.wav', '.flac', '.m4a', '.aac')
+
+
+def get_data_dir():
+    base = os.environ.get("APPDATA") or os.path.expanduser("~")
+    path = os.path.join(base, APP_DIR_NAME)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def get_db_path():
+    return os.path.join(get_data_dir(), DB_FILENAME)
+
+
+def scan_audio_folder(path):
+    try:
+        return sorted(
+            os.path.join(path, f) for f in os.listdir(path)
+            if f.lower().endswith(AUDIO_EXTS)
+        )
+    except OSError:
+        return []
+
+
+class LibraryStore:
+    def __init__(self, db_path=None):
+        self.db_path = db_path or get_db_path()
+        self.conn = sqlite3.connect(self.db_path)
+        self.conn.execute("PRAGMA foreign_keys = ON")
+        self._ensure_schema()
+
+    def _ensure_schema(self):
+        self.conn.executescript("""
+            CREATE TABLE IF NOT EXISTS folders (
+                id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                path     TEXT NOT NULL UNIQUE,
+                name     TEXT NOT NULL,
+                added_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE TABLE IF NOT EXISTS tracks (
+                id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                folder_id INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+                path      TEXT NOT NULL,
+                filename  TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS playback_state (
+                key   TEXT PRIMARY KEY,
+                value TEXT
+            );
+        """)
+        self.conn.commit()
+
+    def list_folders(self):
+        return self.conn.execute(
+            "SELECT id, path, name FROM folders ORDER BY added_at, id"
+        ).fetchall()
+
+    def upsert_folder(self, path, name):
+        self.conn.execute(
+            "INSERT INTO folders (path, name) VALUES (?, ?) "
+            "ON CONFLICT(path) DO UPDATE SET name = excluded.name",
+            (path, name)
+        )
+        self.conn.commit()
+        row = self.conn.execute(
+            "SELECT id FROM folders WHERE path = ?", (path,)
+        ).fetchone()
+        return row[0] if row else None
+
+    def replace_tracks(self, folder_id, file_paths):
+        self.conn.execute("DELETE FROM tracks WHERE folder_id = ?", (folder_id,))
+        self.conn.executemany(
+            "INSERT INTO tracks (folder_id, path, filename) VALUES (?, ?, ?)",
+            [(folder_id, p, os.path.basename(p)) for p in file_paths]
+        )
+        self.conn.commit()
+
+    def delete_folder(self, path):
+        row = self.conn.execute(
+            "SELECT id FROM folders WHERE path = ?", (path,)
+        ).fetchone()
+        if row:
+            self.conn.execute("DELETE FROM tracks WHERE folder_id = ?", (row[0],))
+            self.conn.execute("DELETE FROM folders WHERE id = ?", (row[0],))
+            self.conn.commit()
+
+    def get_state(self, key, default=None):
+        row = self.conn.execute(
+            "SELECT value FROM playback_state WHERE key = ?", (key,)
+        ).fetchone()
+        return row[0] if row else default
+
+    def set_state(self, key, value):
+        self.conn.execute(
+            "INSERT INTO playback_state (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, "" if value is None else str(value))
+        )
+        self.conn.commit()
+
+    def close(self):
+        try:
+            self.conn.close()
+        except sqlite3.Error:
+            pass
+
 
 class MarqueeLabel(QLabel):
     def __init__(self, text="", parent=None):
@@ -168,8 +280,8 @@ class MarqueeLabel(QLabel):
 class MetadataWorker(QThread):
     loaded = Signal(str, QPixmap, str)
 
-    def __init__(self, file_path):
-        super().__init__()
+    def __init__(self, file_path, parent=None):
+        super().__init__(parent)
         self.file_path = file_path
 
     def run(self):
@@ -207,7 +319,8 @@ class MetadataWorker(QThread):
 
         self.loaded.emit(self.file_path, pix, name)
 
-    def get_default_cover(self):
+    @staticmethod
+    def get_default_cover():
         pix = render_svg_pixmap("music", color="#FFFFFF", size=30)
         base = QPixmap(120, 120)
         base.fill(QColor("#222328"))
@@ -390,7 +503,7 @@ class AnimatedMiniPlayer(QWidget):
         header_row = QHBoxLayout()
         header_row.setContentsMargins(0, 0, 0, 0)
         
-        self.title_label = MarqueeLabel("Zulfein")
+        self.title_label = MarqueeLabel("No Track Loaded")
         title_font = QFont("Segoe UI", 10, QFont.Weight.Bold)
         self.title_label.setFont(title_font)
         self.title_label.setFixedHeight(18)
@@ -404,7 +517,7 @@ class AnimatedMiniPlayer(QWidget):
         header_row.addWidget(self.title_label, stretch=1)
         header_row.addWidget(self.btn_back_to_full)
 
-        self.folder_label = QLabel("Folder: fine shyte")
+        self.folder_label = QLabel("Add Audio Folders")
         self.folder_label.setFont(QFont("Segoe UI", 8))
         self.folder_label.setStyleSheet("color: rgba(255, 255, 255, 0.70);")
         self.folder_label.setFixedHeight(14)
@@ -503,16 +616,104 @@ class AnimatedMiniPlayer(QWidget):
            not self.tray_widget.rect().contains(self.tray_widget.mapFromGlobal(global_pos)):
             self._animate_to(False)
 
+class _FolderRowWidget(QWidget):
+    clicked = Signal()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        else:
+            super().mousePressEvent(event)
+
+
+class _TrashButton(QPushButton):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._idle = render_svg_pixmap("trash", color="#9A9AA4", size=14)
+        self._hot = render_svg_pixmap("trash", color="#FF6B6B", size=14)
+        self.setFixedSize(18, 18)
+        self.setIconSize(QSize(14, 14))
+        self.setIcon(self._idle)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                border: none;
+                border-radius: 4px;
+            }
+            QPushButton:hover { background: rgba(255, 107, 107, 0.20); }
+        """)
+
+    def enterEvent(self, event):
+        self.setIcon(self._hot)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.setIcon(self._idle)
+        super().leaveEvent(event)
+
+
+class FolderRowAction(QWidgetAction):
+    play_requested = Signal(str)
+    delete_requested = Signal(str)
+
+    def __init__(self, folder_name, is_current=False, is_missing=False, parent=None):
+        super().__init__(parent)
+        self.folder_name = folder_name
+
+        row = _FolderRowWidget()
+        row.setObjectName("FolderRow")
+        row.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        row.setMinimumWidth(190)
+
+        if is_missing:
+            row.setStyleSheet("""
+                #FolderRow { background: transparent; border-radius: 4px; }
+                QLabel { color: rgba(255, 255, 255, 0.38); }
+            """)
+        else:
+            row.setStyleSheet("""
+                #FolderRow { background: transparent; border-radius: 4px; }
+                #FolderRow:hover { background: rgba(255, 255, 255, 0.15); }
+                QLabel { color: #FFFFFF; }
+            """)
+            row.setCursor(Qt.CursorShape.PointingHandCursor)
+            row.clicked.connect(lambda: self.play_requested.emit(self.folder_name))
+
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(8, 4, 6, 4)
+        layout.setSpacing(6)
+
+        prefix = "✓ 📁" if is_current else "   📁"
+        suffix = "  (missing)" if is_missing else ""
+        label = QLabel(f"{prefix} {folder_name}{suffix}")
+        label.setFont(QFont("Segoe UI", 9))
+        label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
+        trash = _TrashButton()
+        trash.setToolTip(f"Remove '{folder_name}' from the player")
+        trash.clicked.connect(lambda: self.delete_requested.emit(self.folder_name))
+
+        layout.addWidget(label, stretch=1)
+        layout.addWidget(trash)
+
+        self.setDefaultWidget(row)
+
+
 class FinalGlassMusicPlayer(QWidget):
     def __init__(self):
         super().__init__()
-        self.settings = QSettings("GlassPlayer", "StateMemory")
+        self.store = LibraryStore()
         self.drag_position = QPoint()
         self.folders = {}
+        self.folder_paths = {}
+        self.missing_folders = {}
         self.current_folder = None
         self.playlist = []
         self.current_index = -1
         self.cover_cache = {}
+        self._workers = set()
+        self.worker = None
 
         self.pending_resume_position = 0
 
@@ -534,6 +735,7 @@ class FinalGlassMusicPlayer(QWidget):
 
     def init_ui(self):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setWindowTitle("Echoes")
         self.setMinimumSize(240, 160)
         self.resize(360, 200)
 
@@ -549,30 +751,55 @@ class FinalGlassMusicPlayer(QWidget):
         container_layout.setSpacing(8)
 
         self.resume_banner = QFrame()
+        self.resume_banner.setObjectName("ResumeBanner")
+        self.resume_banner.setFixedHeight(32)
         self.resume_banner.setStyleSheet("""
-            QFrame {
-                background: rgba(255, 255, 255, 0.12);
-                border-radius: 8px;
+            #ResumeBanner {
+                background: rgba(255, 255, 255, 0.07);
+                border: 0.5px solid rgba(255, 255, 255, 0.14);
+                border-radius: 10px;
             }
-            QLabel { font-size: 10px; color: #FFFFFF; }
-            QPushButton {
-                background: rgba(255, 255, 255, 0.2);
+            QLabel {
+                background: transparent;
                 border: none;
-                border-radius: 4px;
-                color: white;
-                font-size: 10px;
-                font-weight: bold;
-                padding: 2px 6px;
+                font-size: 11px;
+                color: rgba(255, 255, 255, 0.85);
             }
-            QPushButton:hover { background: rgba(255, 255, 255, 0.35); }
+            QPushButton#ResumeAccept {
+                background: #FFFFFF;
+                border: none;
+                border-radius: 10px;
+                color: #15151A;
+                font-size: 10px;
+                font-weight: 600;
+                padding: 0px 12px;
+            }
+            QPushButton#ResumeAccept:hover  { background: rgba(255, 255, 255, 0.88); }
+            QPushButton#ResumeAccept:pressed { background: rgba(255, 255, 255, 0.70); }
+            QPushButton#ResumeDismiss {
+                background: transparent;
+                border: none;
+                border-radius: 10px;
+                color: rgba(255, 255, 255, 0.55);
+                font-size: 11px;
+            }
+            QPushButton#ResumeDismiss:hover {
+                background: rgba(255, 255, 255, 0.12);
+                color: #FFFFFF;
+            }
+            QPushButton#ResumeDismiss:pressed { background: rgba(255, 255, 255, 0.06); }
         """)
         banner_layout = QHBoxLayout(self.resume_banner)
-        banner_layout.setContentsMargins(8, 4, 8, 4)
+        banner_layout.setContentsMargins(10, 6, 6, 6)
         banner_layout.setSpacing(6)
 
         self.resume_label = QLabel("Resume playback?")
         self.btn_accept_resume = QPushButton("Resume")
+        self.btn_accept_resume.setObjectName("ResumeAccept")
+        self.btn_accept_resume.setFixedHeight(20)
         self.btn_dismiss_resume = QPushButton("✕")
+        self.btn_dismiss_resume.setObjectName("ResumeDismiss")
+        self.btn_dismiss_resume.setFixedSize(20, 20)
 
         banner_layout.addWidget(self.resume_label)
         banner_layout.addStretch()
@@ -598,7 +825,7 @@ class FinalGlassMusicPlayer(QWidget):
         self.title_label = MarqueeLabel("No Track Loaded")
         self.title_label.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
 
-        self.artist_label = MarqueeLabel("Add audio folders")
+        self.artist_label = MarqueeLabel("Add Audio folders")
         self.artist_label.setFont(QFont("Segoe UI", 8))
 
         info_layout.addWidget(self.title_label)
@@ -619,6 +846,7 @@ class FinalGlassMusicPlayer(QWidget):
         container_layout.addLayout(self.header_layout)
 
         seek_layout = QVBoxLayout()
+        seek_layout.setContentsMargins(0, 0, 0, 0)
         seek_layout.setSpacing(2)
 
         self.seek_slider = QSlider(Qt.Orientation.Horizontal)
@@ -626,6 +854,8 @@ class FinalGlassMusicPlayer(QWidget):
         self.seek_slider.setFixedHeight(14)
 
         time_layout = QHBoxLayout()
+        time_layout.setContentsMargins(0, 0, 0, 0)
+        time_layout.setSpacing(0)
         self.current_time_label = QLabel("0:00")
         self.remaining_time_label = QLabel("- 0:00")
 
@@ -649,6 +879,8 @@ class FinalGlassMusicPlayer(QWidget):
 
         self.size_grip = QSizeGrip(self)
         self.size_grip.setFixedSize(14, 14)
+        # Kept out of the layout so it can anchor to the window corner instead of
+        # the controls row, which is no longer the bottom row once the playlist opens.
 
         controls_layout.addWidget(self.repeat_btn)
         controls_layout.addStretch(1)
@@ -658,7 +890,7 @@ class FinalGlassMusicPlayer(QWidget):
         controls_layout.addSpacing(12)
         controls_layout.addWidget(self.next_btn)
         controls_layout.addStretch(1)
-        controls_layout.addWidget(self.size_grip)
+        controls_layout.addSpacing(14)
 
         container_layout.addLayout(controls_layout)
 
@@ -740,20 +972,20 @@ class FinalGlassMusicPlayer(QWidget):
                 background-color: {hover_bg};
             }}
             QSlider::groove:horizontal {{
-                height: 3px;
-                background: rgba(255, 255, 255, 0.25);
-                border-radius: 1px;
+                height: 4px;
+                background: rgba(255, 255, 255, 0.22);
+                border-radius: 2px;
             }}
             QSlider::sub-page:horizontal {{
                 background: #FFFFFF;
-                border-radius: 1px;
+                border-radius: 2px;
             }}
             QSlider::handle:horizontal {{
                 background: #FFFFFF;
-                width: 8px;
-                height: 8px;
-                margin: -2px 0;
-                border-radius: 4px;
+                width: 12px;
+                height: 12px;
+                margin: -4px 0;
+                border-radius: 6px;
             }}
             QListWidget {{
                 background: transparent;
@@ -788,15 +1020,14 @@ class FinalGlassMusicPlayer(QWidget):
                 btn.setIcon(render_svg_pixmap(icon_name, color=icon_color, size=icon_size))
 
         if self.current_index < 0 or (self.playlist and self.playlist[self.current_index] not in self.cover_cache):
-            worker = MetadataWorker("")
-            default_pix = worker.get_default_cover()
+            default_pix = MetadataWorker.get_default_cover()
             self.cover_label.setPixmap(self.get_rounded_pixmap(default_pix, 8))
             self.mini_player.disc.set_cover(default_pix)
 
     def update_window_flags(self):
         self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint | 
-            Qt.WindowType.Tool | 
+            Qt.WindowType.FramelessWindowHint |
+            Qt.WindowType.Window |
             Qt.WindowType.WindowStaysOnTopHint
         )
         self.show()
@@ -883,32 +1114,77 @@ class FinalGlassMusicPlayer(QWidget):
         seconds = seconds % 60
         return f"{minutes}:{seconds:02d}"
 
-    def save_state(self):
-        saved_folders = list(self.folders.keys())
-        folder_paths = [os.path.dirname(self.folders[k][0]) for k in saved_folders if self.folders[k]]
+    def _unique_folder_name(self, base, path):
+        if self.folder_paths.get(base) == path or base not in self.folders:
+            return base
+        parent = os.path.basename(os.path.dirname(path)) or "root"
+        candidate = f"{base} ({parent})"
+        n = 2
+        while candidate in self.folders and self.folder_paths.get(candidate) != path:
+            candidate = f"{base} ({parent}) {n}"
+            n += 1
+        return candidate
 
-        self.settings.setValue("folders", folder_paths)
-        if self.current_folder:
-            self.settings.setValue("last_folder", self.current_folder)
-        self.settings.setValue("last_index", self.current_index)
-        self.settings.setValue("last_position", self.player.position())
+    def _migrate_from_registry(self):
+        if self.store.get_state("migrated_from_registry"):
+            return
+        if self.store.list_folders():
+            self.store.set_state("migrated_from_registry", "1")
+            return
+
+        settings = QSettings("GlassPlayer", "StateMemory")
+        legacy_paths = settings.value("folders", [])
+        if isinstance(legacy_paths, str):
+            legacy_paths = [legacy_paths]
+        if not legacy_paths:
+            self.store.set_state("migrated_from_registry", "1")
+            return
+
+        for fpath in legacy_paths:
+            fpath = os.path.normpath(fpath)
+            folder_id = self.store.upsert_folder(fpath, os.path.basename(fpath))
+            if folder_id is not None:
+                self.store.replace_tracks(folder_id, scan_audio_folder(fpath))
+
+        for key in ("last_folder", "last_index", "last_position"):
+            value = settings.value(key, None)
+            if value is not None:
+                self.store.set_state(key, value)
+
+        self.store.set_state("migrated_from_registry", "1")
+
+    def save_state(self):
+        for name, files in self.folders.items():
+            path = self.folder_paths.get(name)
+            if not path:
+                continue
+            folder_id = self.store.upsert_folder(path, name)
+            if folder_id is not None:
+                self.store.replace_tracks(folder_id, files)
+
+        self.store.set_state("last_folder", self.current_folder or "")
+        self.store.set_state("last_index", self.current_index)
+        self.store.set_state("last_position", self.player.position())
 
     def load_saved_state(self):
-        folder_paths = self.settings.value("folders", [])
-        if isinstance(folder_paths, str):
-            folder_paths = [folder_paths]
+        self._migrate_from_registry()
 
-        valid_exts = ('.mp3', '.wav', '.flac', '.m4a', '.aac')
-        for fpath in folder_paths:
-            if os.path.exists(fpath):
-                files = [os.path.join(fpath, f) for f in os.listdir(fpath) if f.lower().endswith(valid_exts)]
-                if files:
-                    fname = os.path.basename(fpath)
-                    self.folders[fname] = files
+        for folder_id, path, name in self.store.list_folders():
+            if not os.path.isdir(path):
+                self.missing_folders[name] = path
+                continue
+            files = scan_audio_folder(path)
+            if files:
+                display = self._unique_folder_name(name, path)
+                self.folders[display] = files
+                self.folder_paths[display] = path
+                if display != name:
+                    self.store.upsert_folder(path, display)
+                self.store.replace_tracks(folder_id, files)
 
-        last_folder = self.settings.value("last_folder", None)
-        last_index = int(self.settings.value("last_index", 0))
-        last_pos = int(self.settings.value("last_position", 0))
+        last_folder = self.store.get_state("last_folder") or None
+        last_index = int(self.store.get_state("last_index", 0) or 0)
+        last_pos = int(self.store.get_state("last_position", 0) or 0)
 
         if last_folder and last_folder in self.folders:
             self.select_folder(last_folder, auto_play=False)
@@ -925,9 +1201,7 @@ class FinalGlassMusicPlayer(QWidget):
 
                 self.player.setSource(QUrl.fromLocalFile(file_path))
 
-                self.worker = MetadataWorker(file_path)
-                self.worker.loaded.connect(self.on_metadata_loaded)
-                self.worker.start()
+                self._start_metadata_worker(file_path)
 
                 if last_pos > 3000:
                     self.pending_resume_position = last_pos
@@ -944,10 +1218,24 @@ class FinalGlassMusicPlayer(QWidget):
 
     def closeEvent(self, event):
         self.save_state()
+        for worker in list(self._workers):
+            worker.wait(3000)
+        self._workers.clear()
+        self.worker = None
+        self.store.close()
         super().closeEvent(event)
+
+    def _position_size_grip(self):
+        margin = 12
+        self.size_grip.move(
+            self.width() - self.size_grip.width() - margin,
+            self.height() - self.size_grip.height() - margin
+        )
+        self.size_grip.raise_()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self._position_size_grip()
         if self.width() < 260:
             self.info_widget.hide()
             self.header_layout.setSpacing(8)
@@ -973,6 +1261,7 @@ class FinalGlassMusicPlayer(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
+        self._position_size_grip()
         apply_windows_acrylic(self.winId(), enable=True, blur_opacity=0xBB, round_corners=True)
 
     def show_folder_menu(self):
@@ -995,30 +1284,134 @@ class FinalGlassMusicPlayer(QWidget):
         add_action.triggered.connect(self.add_folder_dialog)
         menu.addAction(add_action)
 
-        if self.folders:
+        if self.folders or self.missing_folders:
             menu.addSeparator()
+
             for folder_name in self.folders.keys():
-                action = QAction(f"📁 {folder_name}", self)
-                action.setCheckable(True)
-                if folder_name == self.current_folder:
-                    action.setChecked(True)
-                action.triggered.connect(lambda checked, f=folder_name: self.select_folder(f))
-                menu.addAction(action)
+                row = FolderRowAction(
+                    folder_name,
+                    is_current=(folder_name == self.current_folder),
+                    parent=menu
+                )
+                row.play_requested.connect(
+                    lambda f, m=menu: (m.close(), self.select_folder(f))
+                )
+                row.delete_requested.connect(
+                    lambda f, m=menu: (m.close(), self.remove_folder(f))
+                )
+                menu.addAction(row)
+
+            for folder_name in self.missing_folders.keys():
+                row = FolderRowAction(folder_name, is_missing=True, parent=menu)
+                row.delete_requested.connect(
+                    lambda f, m=menu: (m.close(), self.remove_folder(f))
+                )
+                menu.addAction(row)
 
         menu.exec(self.folder_btn.mapToGlobal(QPoint(0, self.folder_btn.height())))
 
     def add_folder_dialog(self):
         folder = QFileDialog.getExistingDirectory(self, "Select Audio Folder")
         if folder:
-            valid_exts = ('.mp3', '.wav', '.flac', '.m4a', '.aac')
-            files = [
-                os.path.join(folder, f) for f in os.listdir(folder)
-                if f.lower().endswith(valid_exts)
-            ]
+            folder = os.path.normpath(folder)
+            files = scan_audio_folder(folder)
             if files:
-                folder_name = os.path.basename(folder)
+                base = os.path.basename(folder) or folder
+                folder_name = self._unique_folder_name(base, folder)
                 self.folders[folder_name] = files
+                self.folder_paths[folder_name] = folder
+                self.missing_folders.pop(folder_name, None)
                 self.select_folder(folder_name)
+                self.save_state()
+
+    def _confirm_remove(self, folder_name):
+        box = QMessageBox(self)
+        box.setWindowTitle("Remove folder?")
+        box.setIcon(QMessageBox.Icon.NoIcon)
+        box.setText(f"<b>\"{folder_name}\"</b> will be removed from the player.")
+        box.setInformativeText("Your audio files will NOT be deleted from disk.")
+        box.setStyleSheet("""
+            QMessageBox {
+                background-color: rgba(24, 24, 30, 1.0);
+            }
+            QMessageBox QLabel {
+                color: #FFFFFF;
+                font-size: 11px;
+            }
+            QPushButton {
+                background: rgba(255, 255, 255, 0.18);
+                border: none;
+                border-radius: 4px;
+                color: #FFFFFF;
+                font-size: 11px;
+                font-weight: bold;
+                padding: 5px 14px;
+                min-width: 64px;
+            }
+            QPushButton:hover { background: rgba(255, 255, 255, 0.32); }
+        """)
+        remove_btn = box.addButton("Remove", QMessageBox.ButtonRole.DestructiveRole)
+        cancel_btn = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(cancel_btn)
+        box.exec()
+        return box.clickedButton() is remove_btn
+
+    def remove_folder(self, folder_name):
+        known = folder_name in self.folders or folder_name in self.missing_folders
+        if not known:
+            return
+        if not self._confirm_remove(folder_name):
+            return
+
+        path = self.folder_paths.get(folder_name) or self.missing_folders.get(folder_name)
+        was_current = (folder_name == self.current_folder)
+        removed_files = self.folders.get(folder_name, [])
+
+        self.folders.pop(folder_name, None)
+        self.folder_paths.pop(folder_name, None)
+        self.missing_folders.pop(folder_name, None)
+
+        for f in removed_files:
+            self.cover_cache.pop(f, None)
+
+        if path:
+            self.store.delete_folder(path)
+
+        if was_current:
+            self._reset_after_removal()
+
+        self.save_state()
+
+    def _reset_after_removal(self):
+        self.resume_banner.hide()
+        self.pending_resume_position = 0
+
+        if self.folders:
+            self.select_folder(next(iter(self.folders)), auto_play=False)
+            return
+
+        self.player.stop()
+        self.player.setSource(QUrl())
+
+        self.current_folder = None
+        self.playlist = []
+        self.current_index = -1
+        self.playlist_widget.clear()
+
+        self.title_label.setText("No Track Loaded")
+        self.artist_label.setText("Add Audio folders")
+        self.mini_player.title_label.setText("No Track Loaded")
+        self.mini_player.folder_label.setText("No folder")
+
+        default_cover = MetadataWorker.get_default_cover()
+        self.cover_label.setPixmap(self.get_rounded_pixmap(default_cover, 8))
+        self.mini_player.disc.set_cover(default_cover)
+        self.mini_player.disc.set_progress(0)
+
+        self.seek_slider.setRange(0, 0)
+        self.seek_slider.setValue(0)
+        self.current_time_label.setText("0:00")
+        self.remaining_time_label.setText("- 0:00")
 
     def select_folder(self, folder_name, auto_play=True):
         self.current_folder = folder_name
@@ -1055,12 +1448,24 @@ class FinalGlassMusicPlayer(QWidget):
             self.cover_label.setPixmap(self.get_rounded_pixmap(pix, 8))
             self.mini_player.disc.set_cover(pix)
         else:
-            self.worker = MetadataWorker(file_path)
-            self.worker.loaded.connect(self.on_metadata_loaded)
-            self.worker.start()
+            self._start_metadata_worker(file_path)
 
         if auto_play:
             self.player.play()
+
+    def _start_metadata_worker(self, file_path):
+        worker = MetadataWorker(file_path, parent=self)
+        worker.loaded.connect(self.on_metadata_loaded)
+        worker.finished.connect(lambda w=worker: self._retire_metadata_worker(w))
+        self._workers.add(worker)
+        self.worker = worker
+        worker.start()
+
+    def _retire_metadata_worker(self, worker):
+        self._workers.discard(worker)
+        if self.worker is worker:
+            self.worker = None
+        worker.deleteLater()
 
     @Slot(str, QPixmap, str)
     def on_metadata_loaded(self, file_path, pixmap, title):
@@ -1103,6 +1508,7 @@ class FinalGlassMusicPlayer(QWidget):
         self.is_mini_mode = not self.is_mini_mode
         if self.is_mini_mode:
             self.container.hide()
+            self.size_grip.hide()
             self.setStyleSheet("background: transparent; border: none;")
             self.mini_player.show()
             self.mini_player.circle_btn.raise_()
@@ -1132,7 +1538,20 @@ class FinalGlassMusicPlayer(QWidget):
             event.accept()
 
 if __name__ == "__main__":
+    if platform.system() == "Windows":
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "itsvrtx.glassplayer.musicplayer.1"
+            )
+        except Exception:
+            pass
+
     app = QApplication(sys.argv)
+
+    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.ico")
+    if os.path.exists(icon_path):
+        app.setWindowIcon(QIcon(icon_path))
+
     player = FinalGlassMusicPlayer()
     player.show()
     sys.exit(app.exec())
